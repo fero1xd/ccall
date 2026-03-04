@@ -7,6 +7,8 @@
 #include <fcntl.h>
 #include <pthread.h>
 #include <stdatomic.h>
+#include <sys/socket.h>
+#include <arpa/inet.h>
 
 typedef int32_t i32;
 typedef uint32_t u32;
@@ -27,6 +29,9 @@ pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
 ma_pcm_rb rb;
+int sockfd;
+struct sockaddr_in dest_addr;
+socklen_t addrlen = sizeof(dest_addr);
 
 void data_callback(ma_device *device, void *pOutput, const void *pInput, ma_uint32 frameCount)
 {
@@ -35,8 +40,6 @@ void data_callback(ma_device *device, void *pOutput, const void *pInput, ma_uint
     assert(ma_pcm_rb_acquire_write(&rb, &required_frames, &buf) == MA_SUCCESS);
     assert(buf != NULL);
     assert(required_frames == frameCount);
-
-    printf("available write: %d\n", ma_pcm_rb_available_write(&rb));
 
     memcpy(buf, pInput, required_frames * sizeof(i32));
 
@@ -68,6 +71,7 @@ void data_callback(ma_device *device, void *pOutput, const void *pInput, ma_uint
 void playback_callback(ma_device *device, void *pOutput, const void *pInput, ma_uint32 frameCount)
 {
     (void)pInput;
+    (void)pOutput;
     (void)device;
 
     u32 required_frames = frameCount;
@@ -79,16 +83,34 @@ void playback_callback(ma_device *device, void *pOutput, const void *pInput, ma_
         printf("not enough frames available to read\n");
         return;
     }
-    printf("available read: %d\n", ma_pcm_rb_available_read(&rb));
+    // printf("frameCount: %d, available read: %d\n", frameCount, ma_pcm_rb_available_read(&rb));
 
     assert(buf != NULL);
-    memcpy(pOutput, buf, required_frames * sizeof(i32));
+    // memcpy(pOutput, buf, required_frames * sizeof(i32));
+    ssize_t bytes_sent = sendto(sockfd,
+                                buf,
+                                required_frames * sizeof(i32), 0,
+                                (const struct sockaddr *)&dest_addr,
+                                addrlen);
+
+    printf("sent:%zd frames:%d\n", bytes_sent, required_frames);
+    assert(bytes_sent == (required_frames * sizeof(i32)));
+
     assert(ma_pcm_rb_commit_read(&rb, required_frames) == MA_SUCCESS);
 }
 
 int main()
 {
     assert(ma_pcm_rb_init(BIT_DEPTH, NUM_CHANNELS, RECORD_BUFFER_LENGTH, NULL, NULL, &rb) == MA_SUCCESS);
+
+    // setup udp socket
+    assert((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) >= 0);
+
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    // setup dest address
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_port = htons(3000);
+    dest_addr.sin_addr.s_addr = inet_addr("0.0.0.0");
 
     ma_device_config config = ma_device_config_init(ma_device_type_capture);
     config.sampleRate = SAMPLE_RATE;
@@ -160,5 +182,6 @@ int main()
     ma_device_uninit(&device);
     ma_device_uninit(&playback_device);
     ma_pcm_rb_uninit(&rb);
+    close(sockfd);
     return 0;
 }
