@@ -9,6 +9,7 @@
 #include <stdatomic.h>
 #include <sys/socket.h>
 #include <arpa/inet.h>
+#include <opus/opus.h>
 
 typedef int32_t i32;
 typedef uint32_t u32;
@@ -21,17 +22,11 @@ typedef uint32_t u32;
 #define SAMPLE_RATE 48000
 #define RECORD_BUFFER_LENGTH SAMPLE_RATE * NUM_CHANNELS * (5)
 
-i32 buffer[RECORD_BUFFER_LENGTH];
-atomic_uint j = 0;
-size_t offset = 0;
-
-pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
-pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
-
 ma_pcm_rb rb;
 int sockfd;
 struct sockaddr_in dest_addr;
 socklen_t addrlen = sizeof(dest_addr);
+OpusEncoder *enc;
 
 void data_callback(ma_device *device, void *pOutput, const void *pInput, ma_uint32 frameCount)
 {
@@ -68,6 +63,7 @@ void data_callback(ma_device *device, void *pOutput, const void *pInput, ma_uint
     (void)pOutput;
 }
 
+unsigned char opusPacket[4000];
 void playback_callback(ma_device *device, void *pOutput, const void *pInput, ma_uint32 frameCount)
 {
     (void)pInput;
@@ -83,25 +79,33 @@ void playback_callback(ma_device *device, void *pOutput, const void *pInput, ma_
         printf("not enough frames available to read\n");
         return;
     }
+
     // printf("frameCount: %d, available read: %d\n", frameCount, ma_pcm_rb_available_read(&rb));
 
     assert(buf != NULL);
     // memcpy(pOutput, buf, required_frames * sizeof(i32));
+
+    ma_pcm_s32_to_s16(buf, buf, required_frames, 0);
+
+    i32 n = opus_encode(enc, (opus_int16 *)buf, required_frames, opusPacket, 4000);
     ssize_t bytes_sent = sendto(sockfd,
-                                buf,
-                                required_frames * sizeof(i32), 0,
+                                opusPacket,
+                                n, 0,
                                 (const struct sockaddr *)&dest_addr,
                                 addrlen);
 
-    printf("sent:%zd frames:%d\n", bytes_sent, required_frames);
-    assert(bytes_sent == (required_frames * sizeof(i32)));
-
+    printf("norma_size:%zd frames:%d opus_encoded: %d\n", required_frames * sizeof(int16_t), required_frames, n);
+    assert(bytes_sent == n);
     assert(ma_pcm_rb_commit_read(&rb, required_frames) == MA_SUCCESS);
 }
 
 int main()
 {
     assert(ma_pcm_rb_init(BIT_DEPTH, NUM_CHANNELS, RECORD_BUFFER_LENGTH, NULL, NULL, &rb) == MA_SUCCESS);
+    int err;
+
+    enc = opus_encoder_create(48000, 1, OPUS_APPLICATION_VOIP, &err);
+    assert(err == OPUS_OK);
 
     // setup udp socket
     assert((sockfd = socket(AF_INET, SOCK_DGRAM, 0)) >= 0);
@@ -124,6 +128,7 @@ int main()
     playback_config.playback.channels = NUM_CHANNELS;
     playback_config.playback.format = BIT_DEPTH;
     playback_config.dataCallback = playback_callback;
+    playback_config.periodSizeInMilliseconds = 20;
 
     ma_device device;
     ma_device playback_device;
@@ -139,45 +144,10 @@ int main()
     assert(ma_device_start(&playback_device) == MA_SUCCESS);
     printf("Capture and Playback device started\n");
 
-    // pthread_mutex_lock(&mutex);
-    // while (atomic_load_explicit(&j, memory_order_acquire) < RECORD_BUFFER_LENGTH)
-    // {
-    //     pthread_cond_wait(&cond, &mutex);
-    // }
-
-    // int index = atomic_load_explicit(&j, memory_order_acquire);
-    // printf("closing device at index: %d\n", index);
-
-    // pthread_mutex_unlock(&mutex);
-
     getchar();
 
     assert(ma_device_stop(&device) == MA_SUCCESS);
     assert(ma_device_stop(&playback_device) == MA_SUCCESS);
-
-    // int fd = open("sample.pcm", O_CREAT | O_TRUNC | O_WRONLY, 0644);
-    // if (fd < 0)
-    // {
-    //     perror("file");
-    //     return -1;
-    // }
-
-    // unsigned long offset = 0;
-
-    // while (offset < (RECORD_BUFFER_LENGTH * sizeof(i32)))
-    // {
-    //     int n = write(fd, ((char *)buffer) + offset, (RECORD_BUFFER_LENGTH * sizeof(i32)) - offset);
-    //     if (n > 0)
-    //     {
-    //         offset += n;
-    //     }
-    //     else
-    //     {
-    //         printf("n == 0");
-    //         return -1;
-    //     }
-    // }
-    // printf("Written to disk\n");
 
     ma_device_uninit(&device);
     ma_device_uninit(&playback_device);

@@ -10,6 +10,7 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "opusscript": "^0.1.1",
     "speaker": "^0.5.5"
   },
   "trustedDependencies": [

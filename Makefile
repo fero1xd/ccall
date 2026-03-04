@@ -1,5 +1,5 @@
 CC = clang
-CFLAGS = -Wall -Wextra -Iinclude
+CFLAGS = -Wall -Wextra -Iinclude -I/opt/homebrew/include -L/opt/homebrew/lib -lopus
 TARGET = bin/main
 
 all: build
