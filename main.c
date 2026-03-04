@@ -12,11 +12,11 @@ typedef int32_t i32;
 typedef uint32_t u32;
 
 #define MIN(a, b) ((a) < (b) ? (a) : (b))
+#define MAX(a, b) ((a) > (b) ? (a) : (b))
 
 #define NUM_CHANNELS 1
 #define BIT_DEPTH ma_format_s32
 #define SAMPLE_RATE 48000
-
 #define RECORD_BUFFER_LENGTH SAMPLE_RATE * NUM_CHANNELS * (5)
 
 i32 buffer[RECORD_BUFFER_LENGTH];
@@ -26,25 +26,40 @@ size_t offset = 0;
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
 
+ma_pcm_rb rb;
+
 void data_callback(ma_device *device, void *pOutput, const void *pInput, ma_uint32 frameCount)
 {
-    unsigned int index =
-        atomic_load_explicit(&j, memory_order_relaxed);
+    u32 required_frames = frameCount;
+    void *buf = NULL;
+    assert(ma_pcm_rb_acquire_write(&rb, &required_frames, &buf) == MA_SUCCESS);
+    assert(buf != NULL);
+    assert(required_frames == frameCount);
 
-    for (ma_uint32 i = 0;
-         i < frameCount && index < RECORD_BUFFER_LENGTH;
-         i++)
-    {
-        buffer[index++] = ((i32 *)pInput)[i];
-    }
+    printf("available write: %d\n", ma_pcm_rb_available_write(&rb));
 
-    atomic_store_explicit(&j, index, memory_order_release);
+    memcpy(buf, pInput, required_frames * sizeof(i32));
 
-    if (index >= RECORD_BUFFER_LENGTH)
-    {
-        printf("Index: %d\n", index);
-        pthread_cond_signal(&cond);
-    }
+    // printf("required_frames: %d, ", required_frames);
+    // printf("available write: %d\n", ma_pcm_rb_available_write(&rb));
+
+    assert(ma_pcm_rb_commit_write(&rb, required_frames) == MA_SUCCESS);
+    // unsigned int index =
+    //     atomic_load_explicit(&j, memory_order_relaxed);
+
+    // if (index > RECORD_BUFFER_LENGTH)
+    //     return;
+
+    // u32 len = MIN(RECORD_BUFFER_LENGTH - index, frameCount);
+    // // memcpy(&buffer[index], pInput, len * sizeof(i32));
+    // index += len;
+    // atomic_store_explicit(&j, index, memory_order_release);
+
+    // if (index >= RECORD_BUFFER_LENGTH)
+    // {
+    //     // Signal once. Avoid printf in RT thread.
+    //     pthread_cond_signal(&cond);
+    // }
 
     (void)device;
     (void)pOutput;
@@ -55,17 +70,25 @@ void playback_callback(ma_device *device, void *pOutput, const void *pInput, ma_
     (void)pInput;
     (void)device;
 
-    if (offset >= RECORD_BUFFER_LENGTH)
+    u32 required_frames = frameCount;
+    void *buf = NULL;
+
+    assert(ma_pcm_rb_acquire_read(&rb, &required_frames, &buf) == MA_SUCCESS);
+    if (required_frames != frameCount)
+    {
+        printf("not enough frames available to read\n");
         return;
+    }
+    printf("available read: %d\n", ma_pcm_rb_available_read(&rb));
 
-    u32 len = MIN(RECORD_BUFFER_LENGTH - offset, frameCount);
-    memcpy(pOutput, &buffer[offset], len * sizeof(i32));
-
-    offset += len;
+    assert(buf != NULL);
+    memcpy(pOutput, buf, required_frames * sizeof(i32));
+    assert(ma_pcm_rb_commit_read(&rb, required_frames) == MA_SUCCESS);
 }
 
 int main()
 {
+    assert(ma_pcm_rb_init(BIT_DEPTH, NUM_CHANNELS, RECORD_BUFFER_LENGTH, NULL, NULL, &rb) == MA_SUCCESS);
 
     ma_device_config config = ma_device_config_init(ma_device_type_capture);
     config.sampleRate = SAMPLE_RATE;
@@ -91,54 +114,51 @@ int main()
     printf("%d, %d, %d, %s\n", playback_device.sampleRate, playback_device.playback.channels, playback_device.playback.format, playback_device.playback.name);
 
     assert(ma_device_start(&device) == MA_SUCCESS);
-
-    printf("Capture device started\n");
-
-    pthread_mutex_lock(&mutex);
-    while (atomic_load_explicit(&j, memory_order_acquire) < RECORD_BUFFER_LENGTH)
-    {
-        pthread_cond_wait(&cond, &mutex);
-    }
-
-    int index = atomic_load_explicit(&j, memory_order_acquire);
-    printf("closing device at index: %d\n", index);
-
-    pthread_mutex_unlock(&mutex);
-
-    if (ma_device_stop(&device) != MA_SUCCESS)
-    {
-        perror("device stop error");
-        return -1;
-    }
-
-    int fd = open("sample.pcm", O_CREAT | O_TRUNC | O_WRONLY, 0644);
-    if (fd < 0)
-    {
-        perror("file");
-        return -1;
-    }
-
-    unsigned long offset = 0;
-
-    while (offset < (RECORD_BUFFER_LENGTH * sizeof(i32)))
-    {
-        int n = write(fd, ((char *)buffer) + offset, (RECORD_BUFFER_LENGTH * sizeof(i32)) - offset);
-        if (n > 0)
-        {
-            offset += n;
-        }
-        else
-        {
-            printf("n == 0");
-            return -1;
-        }
-    }
-    printf("Written to disk\n");
-    printf("Starting playback device\n");
-
     assert(ma_device_start(&playback_device) == MA_SUCCESS);
+    printf("Capture and Playback device started\n");
+
+    // pthread_mutex_lock(&mutex);
+    // while (atomic_load_explicit(&j, memory_order_acquire) < RECORD_BUFFER_LENGTH)
+    // {
+    //     pthread_cond_wait(&cond, &mutex);
+    // }
+
+    // int index = atomic_load_explicit(&j, memory_order_acquire);
+    // printf("closing device at index: %d\n", index);
+
+    // pthread_mutex_unlock(&mutex);
+
     getchar();
 
+    assert(ma_device_stop(&device) == MA_SUCCESS);
+    assert(ma_device_stop(&playback_device) == MA_SUCCESS);
+
+    // int fd = open("sample.pcm", O_CREAT | O_TRUNC | O_WRONLY, 0644);
+    // if (fd < 0)
+    // {
+    //     perror("file");
+    //     return -1;
+    // }
+
+    // unsigned long offset = 0;
+
+    // while (offset < (RECORD_BUFFER_LENGTH * sizeof(i32)))
+    // {
+    //     int n = write(fd, ((char *)buffer) + offset, (RECORD_BUFFER_LENGTH * sizeof(i32)) - offset);
+    //     if (n > 0)
+    //     {
+    //         offset += n;
+    //     }
+    //     else
+    //     {
+    //         printf("n == 0");
+    //         return -1;
+    //     }
+    // }
+    // printf("Written to disk\n");
+
     ma_device_uninit(&device);
+    ma_device_uninit(&playback_device);
+    ma_pcm_rb_uninit(&rb);
     return 0;
 }
