@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <assert.h>
 #include <stdint.h>
 #define MINIAUDIO_IMPLEMENTATION
 #include <miniaudio.h>
@@ -8,6 +9,9 @@
 #include <stdatomic.h>
 
 typedef int32_t i32;
+typedef uint32_t u32;
+
+#define MIN(a, b) ((a) < (b) ? (a) : (b))
 
 #define NUM_CHANNELS 1
 #define BIT_DEPTH ma_format_s32
@@ -17,6 +21,7 @@ typedef int32_t i32;
 
 i32 buffer[RECORD_BUFFER_LENGTH];
 atomic_uint j = 0;
+size_t offset = 0;
 
 pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 pthread_cond_t cond = PTHREAD_COND_INITIALIZER;
@@ -45,32 +50,49 @@ void data_callback(ma_device *device, void *pOutput, const void *pInput, ma_uint
     (void)pOutput;
 }
 
+void playback_callback(ma_device *device, void *pOutput, const void *pInput, ma_uint32 frameCount)
+{
+    (void)pInput;
+    (void)device;
+
+    if (offset >= RECORD_BUFFER_LENGTH)
+        return;
+
+    u32 len = MIN(RECORD_BUFFER_LENGTH - offset, frameCount);
+    memcpy(pOutput, &buffer[offset], len * sizeof(i32));
+
+    offset += len;
+}
+
 int main()
 {
-    getchar();
+
     ma_device_config config = ma_device_config_init(ma_device_type_capture);
     config.sampleRate = SAMPLE_RATE;
     config.capture.channels = NUM_CHANNELS;
     config.capture.format = BIT_DEPTH;
     config.dataCallback = data_callback;
+    config.periodSizeInMilliseconds = 20;
+
+    ma_device_config playback_config = ma_device_config_init(ma_device_type_playback);
+    playback_config.sampleRate = SAMPLE_RATE;
+    playback_config.playback.channels = NUM_CHANNELS;
+    playback_config.playback.format = BIT_DEPTH;
+    playback_config.dataCallback = playback_callback;
 
     ma_device device;
-    if (ma_device_init(NULL, &config, &device) != MA_SUCCESS)
-    {
-        perror("device init issue");
-        return -1;
-    }
+    ma_device playback_device;
+    assert(ma_device_init(NULL, &config, &device) == MA_SUCCESS);
+    assert(ma_device_init(NULL, &playback_config, &playback_device) == MA_SUCCESS);
 
-    printf("Device Info: ");
+    printf("Capture device Info: ");
     printf("%d, %d, %d, %s\n", device.sampleRate, device.capture.channels, device.capture.format, device.capture.name);
+    printf("Playback device Info: ");
+    printf("%d, %d, %d, %s\n", playback_device.sampleRate, playback_device.playback.channels, playback_device.playback.format, playback_device.playback.name);
 
-    if (ma_device_start(&device) != MA_SUCCESS)
-    {
-        perror("device start");
-        return -1;
-    }
+    assert(ma_device_start(&device) == MA_SUCCESS);
 
-    printf("Device started\n");
+    printf("Capture device started\n");
 
     pthread_mutex_lock(&mutex);
     while (atomic_load_explicit(&j, memory_order_acquire) < RECORD_BUFFER_LENGTH)
@@ -111,7 +133,11 @@ int main()
             return -1;
         }
     }
-    printf("Written to disk");
+    printf("Written to disk\n");
+    printf("Starting playback device\n");
+
+    assert(ma_device_start(&playback_device) == MA_SUCCESS);
+    getchar();
 
     ma_device_uninit(&device);
     return 0;
